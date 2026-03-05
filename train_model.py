@@ -4,14 +4,16 @@ train.py
 Loads landmarks.csv produced by prepare_data.py, trains a RandomForest +
 MLP ensemble classifier, evaluates it, and saves the model to drowsy_model.pkl.
 
+Features: 478 landmark (x,y,z) coords + ear_left, ear_right, ear_avg
+
 USAGE
 -----
     python train.py
 
 OUTPUT
 ------
-    drowsy_model.pkl   ← loaded by face_mesh.py at runtime
-    confusion_matrix.png
+    drowsy_model.pkl
+    Images/confusion_matrix.png
 """
 
 import os
@@ -29,8 +31,8 @@ from sklearn.metrics           import (classification_report,
                                        ConfusionMatrixDisplay)
 from sklearn.pipeline          import Pipeline
 
-CSV_PATH   = "landmarks.csv"
-MODEL_PATH = "drowsy_model.pkl"
+CSV_PATH     = "landmarks.csv"
+MODEL_PATH   = "drowsy_model.pkl"
 RANDOM_STATE = 42
 
 # ── Load data ─────────────────────────────────────────────────────────────────
@@ -38,6 +40,12 @@ print(f"Loading {CSV_PATH} ...")
 df = pd.read_csv(CSV_PATH)
 print(f"  Shape: {df.shape}")
 print(f"  Class distribution:\n{df['label'].value_counts()}\n")
+
+# Confirm EAR columns are present
+ear_cols = ["ear_left", "ear_right", "ear_avg"]
+for col in ear_cols:
+    if col not in df.columns:
+        print(f"[WARN] '{col}' column not found — re-run prepare_data.py to regenerate landmarks.csv with EAR features.")
 
 X = df.drop(columns=["label"]).values.astype(np.float32)
 y = df["label"].values
@@ -53,17 +61,23 @@ X_train, X_test, y_train, y_test = train_test_split(
 print(f"\nTrain: {len(X_train)}  |  Test: {len(X_test)}")
 
 # ── Build model pipeline ──────────────────────────────────────────────────────
-# Voting ensemble: RandomForest (tree-based, no scaling needed) +
-#                  MLP (needs scaling — handled inside pipeline)
-rf  = RandomForestClassifier(n_estimators=200, max_depth=None,
-                              n_jobs=-1, random_state=RANDOM_STATE)
+# EAR features are relatively low-variance but highly informative —
+# RandomForest will naturally weight them appropriately.
+rf = RandomForestClassifier(
+    n_estimators=200,
+    max_depth=None,
+    n_jobs=-1,
+    random_state=RANDOM_STATE,
+)
 
 mlp = Pipeline([
     ("scaler", StandardScaler()),
-    ("mlp",    MLPClassifier(hidden_layer_sizes=(256, 128),
-                              activation="relu",
-                              max_iter=300,
-                              random_state=RANDOM_STATE)),
+    ("mlp",    MLPClassifier(
+        hidden_layer_sizes=(256, 128),
+        activation="relu",
+        max_iter=300,
+        random_state=RANDOM_STATE,
+    )),
 ])
 
 ensemble = VotingClassifier(
@@ -72,22 +86,23 @@ ensemble = VotingClassifier(
     n_jobs=-1,
 )
 
-# ── Cross-validation (quick sanity check) ─────────────────────────────────────
-print("\nRunning 5-fold cross-validation on training set (this may take a minute)...")
-cv_scores = cross_val_score(ensemble, X_train, y_train, cv=5, scoring="accuracy", n_jobs=-1)
+# ── Cross-validation ──────────────────────────────────────────────────────────
+print("\nRunning 5-fold cross-validation on training set...")
+cv_scores = cross_val_score(ensemble, X_train, y_train, cv=5,
+                             scoring="accuracy", n_jobs=-1)
 print(f"  CV accuracy: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
 
 # ── Final fit ─────────────────────────────────────────────────────────────────
 print("\nFitting final model on full training set...")
 ensemble.fit(X_train, y_train)
 
-# ── Evaluate on held-out test set ─────────────────────────────────────────────
+# ── Evaluate ──────────────────────────────────────────────────────────────────
 y_pred = ensemble.predict(X_test)
 print("\nTest set results:")
 print(classification_report(y_test, y_pred, target_names=le.classes_))
-# Confusion matrix
+
 os.makedirs("Images", exist_ok=True)
-cm = confusion_matrix(y_test, y_pred)
+cm   = confusion_matrix(y_test, y_pred)
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=le.classes_)
 fig, ax = plt.subplots(figsize=(6, 5))
 disp.plot(ax=ax, colorbar=False, cmap="Blues")
@@ -97,9 +112,9 @@ plt.savefig(os.path.join("Images", "confusion_matrix.png"), dpi=120)
 print("Confusion matrix saved → Images/confusion_matrix.png")
 plt.close()
 
-# ── Save model + encoder ──────────────────────────────────────────────────────
+# ── Save ──────────────────────────────────────────────────────────────────────
 payload = {"model": ensemble, "label_encoder": le}
 with open(MODEL_PATH, "wb") as f:
     pickle.dump(payload, f)
 print(f"\nModel saved → {MODEL_PATH}")
-print("Ready!  Run face_recog.py to use it with your webcam.")
+print("Ready!  Run face_mesh.py to use it with your webcam.")
