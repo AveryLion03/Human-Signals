@@ -102,4 +102,4 @@ payload = {"model": ensemble, "label_encoder": le}
 with open(MODEL_PATH, "wb") as f:
     pickle.dump(payload, f)
 print(f"\nModel saved → {MODEL_PATH}")
-print("Ready!  Run face_mesh.py to use it with your webcam.")
+print("Ready!  Run face_recog.py to use it with your webcam.")
