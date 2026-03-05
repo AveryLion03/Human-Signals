@@ -85,16 +85,16 @@ ensemble.fit(X_train, y_train)
 y_pred = ensemble.predict(X_test)
 print("\nTest set results:")
 print(classification_report(y_test, y_pred, target_names=le.classes_))
-
 # Confusion matrix
+os.makedirs("Images", exist_ok=True)
 cm = confusion_matrix(y_test, y_pred)
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=le.classes_)
 fig, ax = plt.subplots(figsize=(6, 5))
 disp.plot(ax=ax, colorbar=False, cmap="Blues")
 plt.title("Confusion Matrix — Drowsiness Classifier")
 plt.tight_layout()
-plt.savefig("confusion_matrix.png", dpi=120)
-print("Confusion matrix saved → confusion_matrix.png")
+plt.savefig(os.path.join("Images", "confusion_matrix.png"), dpi=120)
+print("Confusion matrix saved → Images/confusion_matrix.png")
 plt.close()
 
 # ── Save model + encoder ──────────────────────────────────────────────────────
