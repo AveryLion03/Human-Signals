@@ -1,29 +1,20 @@
 """
 prepare_data.py
 ───────────────
-Reads COCO-format Roboflow datasets, runs MediaPipe FaceMesh on every image,
-extracts 478 landmark (x, y, z) coordinates as features, and saves to
-landmarks.csv ready for train.py.
+Reads the Driver Drowsiness Dataset (DDD) folder structure:
+    dataset/
+        Drowsy/
+            img1.jpg ...
+        Non-Drowsy/
+            img1.jpg ...
 
-EXPECTED FOLDER STRUCTURE (one per dataset):
-    dataset1/
-        train/
-            img1.jpg
-            img2.jpg
-            _annotations.coco.json
-        valid/
-            img1.jpg
-            _annotations.coco.json
+Runs MediaPipe FaceMesh, extracts 478 landmark (x,y,z) coords +
+3 EAR (Eye Aspect Ratio) features → landmarks.csv
 
-USAGE
------
-1. Edit DATA_ROOTS below to point at your 3 dataset root folders.
-2. Run:  python prepare_data.py
-3. Output: landmarks.csv
+EAR drops sharply when eyes close, making it a strong drowsiness signal.
 """
 
 import os
-import json
 import csv
 import cv2
 import numpy as np
@@ -31,41 +22,46 @@ import urllib.request
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-from mediapipe.framework.formats import landmark_pb2
 
-# ── CONFIG — edit these to your actual dataset paths ─────────────────────────
-DATA_ROOTS = [
-    r"E:\Facial\Human-Signals-main\DriverMonitor",   # e.g. r"C:\Downloads\driver-behaviour"
-    r"E:\Facial\Human-Signals-main\DrowsinessDetectionYolov",   # e.g. r"C:\Downloads\driver-monitoring"
-]
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+DATA_ROOT  = r"E:\Facial\Human-Signals-main\DDD"   # folder containing Drowsy/ and Non-Drowsy/
+OUTPUT_CSV = "landmarks.csv"
+MODEL_PATH = "face_landmarker.task"
 
-OUTPUT_CSV   = "landmarks.csv"
-MODEL_PATH   = "face_landmarker.task"
-SPLITS       = ["train", "valid", "test"]   # subfolders to scan
-ANNOTATIONS  = "_annotations.coco.json"     # Roboflow's default COCO filename
-
-# ── Class name normalisation ──────────────────────────────────────────────────
-# Maps any Roboflow class name → awake | drowsy | asleep
-# Add more entries here if your dataset uses different names.
 CLASS_MAP = {
-    # awake
-    "awake": "awake", "alert": "awake", "focus": "awake",
-    "focused": "awake", "normal": "awake", "attentive": "awake",
-    "no_drowsiness": "awake", "nodrowsiness": "awake", "0": "awake",
-    # drowsy
-    "drowsy": "drowsy", "drowsiness": "drowsy", "sleepy": "drowsy", "Drowsiness (Glasses)": "drowsy", "Drowsiness (SunGlasses)": "drowsy",
-    "tired": "drowsy", "fatigue": "drowsy", "yawn": "drowsy", 
-    "microsleep": "drowsy", "1": "drowsy",
-    # asleep
-    "asleep": "asleep", "sleep": "asleep", "sleeping": "asleep", "Eyes closed" : "drowsy",
-    "closed": "asleep", "eyes_closed": "asleep", "2": "asleep",
+    "nondrowsy":  "awake",
+    "non_drowsy": "awake",
+    "alert":      "awake",
+    "awake":      "awake",
+    "drowsy":     "drowsy",
 }
 
-def normalise_class(name: str):
-    key = name.lower().strip().replace("-", "_").replace(" ", "_")
-    return CLASS_MAP.get(key, None)
+# ── MediaPipe landmark indices for EAR ───────────────────────────────────────
+# Left eye:  outer=33, inner=133, top1=160, top2=158, bot1=144, bot2=153
+# Right eye: outer=362, inner=263, top1=385, top2=387, bot1=373, bot2=380
+LEFT_EYE  = {"outer": 33,  "inner": 133, "top1": 160, "top2": 158,
+              "bot1":  144, "bot2":  153}
+RIGHT_EYE = {"outer": 362, "inner": 263, "top1": 385, "top2": 387,
+              "bot1":  373, "bot2":  380}
 
-# ── Model download ────────────────────────────────────────────────────────────
+def compute_ear(landmarks, eye):
+    """Eye Aspect Ratio = (v1 + v2) / (2 * horizontal)"""
+    def pt(idx):
+        lm = landmarks[idx]
+        return np.array([lm.x, lm.y])
+
+    v1 = np.linalg.norm(pt(eye["top1"]) - pt(eye["bot1"]))
+    v2 = np.linalg.norm(pt(eye["top2"]) - pt(eye["bot2"]))
+    h  = np.linalg.norm(pt(eye["outer"]) - pt(eye["inner"]))
+    return (v1 + v2) / (2.0 * h + 1e-6)
+
+def compute_ears(landmarks):
+    """Returns (left_ear, right_ear, avg_ear)."""
+    left  = compute_ear(landmarks, LEFT_EYE)
+    right = compute_ear(landmarks, RIGHT_EYE)
+    return left, right, (left + right) / 2.0
+
+# ── Model ─────────────────────────────────────────────────────────────────────
 def ensure_model():
     if not os.path.exists(MODEL_PATH):
         print("Downloading face landmarker model...")
@@ -76,7 +72,6 @@ def ensure_model():
         )
         print("Model downloaded.")
 
-# ── Detector ──────────────────────────────────────────────────────────────────
 def make_detector():
     base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
     options = vision.FaceLandmarkerOptions(
@@ -88,137 +83,75 @@ def make_detector():
     )
     return vision.FaceLandmarker.create_from_options(options)
 
-def extract_landmarks(detector, img_path: str):
-    """Returns flat list of 478*3=1434 floats, or None if no face detected."""
+def extract_features(detector, img_path: str):
+    """
+    Returns flat list of (478*3 landmark coords) + (left_ear, right_ear, avg_ear),
+    or None if no face detected. Deletes unusable images.
+    """
     img_bgr = cv2.imread(img_path)
     if img_bgr is None:
+        os.remove(img_path)
         return None
     img_rgb  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
     results  = detector.detect(mp_image)
     if not results or not results.face_landmarks:
+        os.remove(img_path)
         return None
-    lms = results.face_landmarks[0]
-    return [coord for lm in lms for coord in (lm.x, lm.y, lm.z)]
 
-# ── COCO parser ───────────────────────────────────────────────────────────────
-def load_coco_labels(split_dir: str):
-    """
-    Reads _annotations.coco.json and returns a dict:
-        { filename: normalised_class_label }
-
-    In object detection COCO JSON, one image may have multiple annotations
-    (bounding boxes). We take the most common class label across all
-    annotations for that image as the image-level label.
-    """
-    json_path = os.path.join(split_dir, ANNOTATIONS)
-    if not os.path.exists(json_path):
-        print(f"  [SKIP] No {ANNOTATIONS} found in {split_dir}")
-        return {}
-
-    with open(json_path, "r") as f:
-        coco = json.load(f)
-
-    # Build id → category name map
-    cat_map = {cat["id"]: cat["name"] for cat in coco.get("categories", [])}
-
-    # Build image id → filename map
-    img_map = {img["id"]: img["file_name"] for img in coco.get("images", [])}
-
-    # Tally class votes per image
-    votes = {}   # image_id → list of normalised labels
-    for ann in coco.get("annotations", []):
-        img_id   = ann["image_id"]
-        cat_name = cat_map.get(ann["category_id"], "")
-        label    = normalise_class(cat_name)
-        if label is None:
-            continue
-        votes.setdefault(img_id, []).append(label)
-
-    # Majority vote → final label per image
-    result = {}
-    for img_id, labels in votes.items():
-        fname = img_map.get(img_id, "")
-        if not fname:
-            continue
-        majority = max(set(labels), key=labels.count)
-        result[os.path.basename(fname)] = majority
-
-    return result
+    lms        = results.face_landmarks[0]
+    coords     = [c for lm in lms for c in (lm.x, lm.y, lm.z)]
+    left_ear, right_ear, avg_ear = compute_ears(lms)
+    return coords + [left_ear, right_ear, avg_ear]
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     ensure_model()
     detector = make_detector()
 
-    total = skipped = written = 0
-    class_counts = {"awake": 0, "drowsy": 0, "asleep": 0}
-    unmapped_classes = set()
+    landmark_cols = [f"{ax}{i}" for i in range(478) for ax in ("x", "y", "z")]
+    header = ["label"] + landmark_cols + ["ear_left", "ear_right", "ear_avg"]
 
-    header = ["label"] + [f"{ax}{i}" for i in range(478) for ax in ("x", "y", "z")]
+    total = written = deleted = 0
+    class_counts = {"awake": 0, "drowsy": 0}
 
     with open(OUTPUT_CSV, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(header)
 
-        for root in DATA_ROOTS:
-            if not os.path.exists(root):
-                print(f"\n[WARN] Path not found, skipping: {root}")
+        for folder in os.listdir(DATA_ROOT):
+            label = CLASS_MAP.get(folder.lower().strip().replace("-", "_"), None)
+            if label is None:
+                print(f"[SKIP] Unrecognised folder: {folder}")
                 continue
-            print(f"\n{'─'*55}")
-            print(f"Dataset: {root}")
 
-            for split in SPLITS:
-                split_dir = os.path.join(root, split)
-                if not os.path.exists(split_dir):
+            folder_path = os.path.join(DATA_ROOT, folder)
+            if not os.path.isdir(folder_path):
+                continue
+
+            files = [fn for fn in os.listdir(folder_path)
+                     if fn.lower().endswith((".jpg", ".jpeg", ".png"))]
+            print(f"\nProcessing '{folder}' → '{label}' ({len(files)} images)")
+
+            for fname in files:
+                img_path = os.path.join(folder_path, fname)
+                total += 1
+                feats = extract_features(detector, img_path)
+                if feats is None:
+                    deleted += 1
                     continue
+                writer.writerow([label] + feats)
+                written += 1
+                class_counts[label] += 1
+                if written % 200 == 0:
+                    print(f"  ... {written} written")
 
-                print(f"  Split: {split}")
-                labels = load_coco_labels(split_dir)
-
-                if not labels:
-                    # Log unmapped categories for debugging
-                    json_path = os.path.join(split_dir, ANNOTATIONS)
-                    if os.path.exists(json_path):
-                        with open(json_path) as jf:
-                            coco = json.load(jf)
-                        cats = [c["name"] for c in coco.get("categories", [])]
-                        print(f"  [WARN] No labels mapped. Categories found: {cats}")
-                        print(f"         Add these to CLASS_MAP in prepare_data.py")
-                        unmapped_classes.update(cats)
-                    continue
-
-                print(f"  Found {len(labels)} labelled images")
-
-                for fname, label in labels.items():
-                    img_path = os.path.join(split_dir, fname)
-                    if not os.path.exists(img_path):
-                        skipped += 1
-                        continue
-                    total += 1
-                    feats = extract_landmarks(detector, img_path)
-                    if feats is None:
-                        skipped += 1
-                        continue
-                    writer.writerow([label] + feats)
-                    written += 1
-                    class_counts[label] = class_counts.get(label, 0) + 1
-                    if written % 100 == 0:
-                        print(f"    ... {written} images processed")
-
-    print(f"\n{'═'*55}")
-    print(f"Done!")
-    print(f"  Total images attempted : {total}")
-    print(f"  Successfully written   : {written}")
-    print(f"  Skipped (no face/file) : {skipped}")
-    print(f"  Class breakdown        : {class_counts}")
-    if unmapped_classes:
-        print(f"\n  [!] Unmapped category names found: {unmapped_classes}")
-        print(f"      Add them to CLASS_MAP in prepare_data.py and re-run.")
-    if written < 100:
-        print(f"\n  [WARN] Very few samples — double-check your DATA_ROOTS paths.")
-    else:
-        print(f"\n  landmarks.csv saved → ready to run train_model.py")
+    print(f"\n{'═'*50}")
+    print(f"Total attempted : {total}")
+    print(f"Written         : {written}")
+    print(f"Deleted/skipped : {deleted}")
+    print(f"Class breakdown : {class_counts}")
+    print(f"landmarks.csv ready → run train_model.py")
 
 if __name__ == "__main__":
     main()
