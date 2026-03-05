@@ -167,7 +167,7 @@ def main():
         print(f"Classifier loaded. Classes: {list(le.classes_)}")
     else:
         print(f"[WARN] {CLASSIFIER_PATH} not found — showing face mesh only.")
-        print("       Run train.py to generate the model.")
+        print("       Run train_model.py to generate the model.")
 
     tracker = FaceTracker()
     cap     = cv2.VideoCapture(0)
@@ -230,7 +230,8 @@ def main():
             break
         elif key == ord("s"):
             snapshot_n += 1
-            fname = f"snapshot_{snapshot_n:03d}.png"
+            os.makedirs("Images", exist_ok=True)
+            fname = os.path.join("Images", f"snapshot_{snapshot_n:03d}.png")
             cv2.imwrite(fname, annotated)
             print(f"Snapshot → {fname}")
         elif key == ord("t"):
