@@ -35,8 +35,8 @@ from mediapipe.framework.formats import landmark_pb2
 
 # ── CONFIG — edit these to your actual dataset paths ─────────────────────────
 DATA_ROOTS = [
-    r"C:\Users\avery\Downloads\Facial\driver behaviour.v2i.coco",   # e.g. r"C:\Downloads\driver-behaviour"
-    r"C:\Users\avery\Downloads\Facial\driver monitoring.v1i.coco",   # e.g. r"C:\Downloads\driver-monitoring"
+    r"E:\Facial\Human-Signals-main\DriverMonitor",   # e.g. r"C:\Downloads\driver-behaviour"
+    r"E:\Facial\Human-Signals-main\DrowsinessDetectionYolov",   # e.g. r"C:\Downloads\driver-monitoring"
 ]
 
 OUTPUT_CSV   = "landmarks.csv"
@@ -53,11 +53,11 @@ CLASS_MAP = {
     "focused": "awake", "normal": "awake", "attentive": "awake",
     "no_drowsiness": "awake", "nodrowsiness": "awake", "0": "awake",
     # drowsy
-    "drowsy": "drowsy", "drowsiness": "drowsy", "sleepy": "drowsy",
-    "tired": "drowsy", "fatigue": "drowsy", "yawn": "drowsy",
+    "drowsy": "drowsy", "drowsiness": "drowsy", "sleepy": "drowsy", "Drowsiness (Glasses)": "drowsy", "Drowsiness (SunGlasses)": "drowsy",
+    "tired": "drowsy", "fatigue": "drowsy", "yawn": "drowsy", 
     "microsleep": "drowsy", "1": "drowsy",
     # asleep
-    "asleep": "asleep", "sleep": "asleep", "sleeping": "asleep",
+    "asleep": "asleep", "sleep": "asleep", "sleeping": "asleep", "Eyes closed" : "drowsy",
     "closed": "asleep", "eyes_closed": "asleep", "2": "asleep",
 }
 
@@ -218,7 +218,7 @@ def main():
     if written < 100:
         print(f"\n  [WARN] Very few samples — double-check your DATA_ROOTS paths.")
     else:
-        print(f"\n  landmarks.csv saved → ready to run train.py")
+        print(f"\n  landmarks.csv saved → ready to run train_model.py")
 
 if __name__ == "__main__":
     main()
