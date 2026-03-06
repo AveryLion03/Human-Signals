@@ -2,12 +2,8 @@
 face_mesh.py
 ────────────
 Real-time driver drowsiness detection using MediaPipe FaceMesh + trained ML model.
-
-Requirements:
-    pip install mediapipe==0.10.9 opencv-python scikit-learn pandas
-
-Run:
-    python face_mesh.py
+Includes Eye Aspect Ratio (EAR) computation for eye-closure detection as both
+an input feature to the model and a rule-based safety override.
 
 Controls:
     Q  →  Quit
@@ -29,17 +25,39 @@ from mediapipe.tasks.python import vision
 from mediapipe.framework.formats import landmark_pb2
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODEL_PATH       = "face_landmarker.task"
-CLASSIFIER_PATH  = "drowsy_model.pkl"
-SMOOTHING_FRAMES = 10       # rolling average window for stable predictions
-ALERT_THRESHOLD  = 0.60     # confidence above which DROWSY/ASLEEP triggers alert
+MODEL_PATH        = "face_landmarker.task"
+CLASSIFIER_PATH   = "drowsy_model.pkl"
+SMOOTHING_FRAMES  = 10      # rolling window for stable predictions
+ALERT_THRESHOLD   = 0.60    # confidence above which DROWSY triggers alert
 
-# Alert colours per class
+# EAR thresholds
+EAR_CLOSED_THRESH = 0.20    # below this = eye closed
+EAR_CLOSED_FRAMES = 15      # consecutive closed frames before override fires
+
 CLASS_COLORS = {
-    "awake":  (80,  200, 80),   # green
-    "drowsy": (0,   180, 255),  # orange
-    "asleep": (50,  50,  220),  # red
+    "awake":  (80,  200, 80),
+    "drowsy": (0,   180, 255),
 }
+
+# ── MediaPipe landmark indices for EAR ───────────────────────────────────────
+LEFT_EYE  = {"outer": 33,  "inner": 133, "top1": 160, "top2": 158,
+              "bot1":  144, "bot2":  153}
+RIGHT_EYE = {"outer": 362, "inner": 263, "top1": 385, "top2": 387,
+              "bot1":  373, "bot2":  380}
+
+def compute_ear(landmarks, eye):
+    def pt(idx):
+        lm = landmarks[idx]
+        return np.array([lm.x, lm.y])
+    v1 = np.linalg.norm(pt(eye["top1"]) - pt(eye["bot1"]))
+    v2 = np.linalg.norm(pt(eye["top2"]) - pt(eye["bot2"]))
+    h  = np.linalg.norm(pt(eye["outer"]) - pt(eye["inner"]))
+    return (v1 + v2) / (2.0 * h + 1e-6)
+
+def compute_ears(landmarks):
+    left  = compute_ear(landmarks, LEFT_EYE)
+    right = compute_ear(landmarks, RIGHT_EYE)
+    return left, right, (left + right) / 2.0
 
 # ── Model download ────────────────────────────────────────────────────────────
 def ensure_model():
@@ -66,11 +84,11 @@ class FaceTracker:
             min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
         )
-        self.detector   = vision.FaceLandmarker.create_from_options(options)
-        self.drawing    = mp.solutions.drawing_utils
-        self.styles     = mp.solutions.drawing_styles
-        self.show_tess  = True
-        self.show_cont  = True
+        self.detector  = vision.FaceLandmarker.create_from_options(options)
+        self.drawing   = mp.solutions.drawing_utils
+        self.styles    = mp.solutions.drawing_styles
+        self.show_tess = True
+        self.show_cont = True
 
     def process(self, frame_bgr):
         rgb      = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -78,12 +96,19 @@ class FaceTracker:
         return self.detector.detect(mp_image)
 
     def get_feature_vector(self, results):
-        """Return flat [x,y,z * 478] feature vector, or None if no face."""
+        """
+        Returns flat feature vector:
+            [x,y,z * 478 landmarks] + [ear_left, ear_right, ear_avg]
+        or (None, None, None) if no face detected.
+        """
         if not results or not results.face_landmarks:
-            return None
+            return None, None, None
         lms = results.face_landmarks[0]
-        return np.array([c for lm in lms for c in (lm.x, lm.y, lm.z)],
-                        dtype=np.float32).reshape(1, -1)
+        coords = np.array([c for lm in lms for c in (lm.x, lm.y, lm.z)],
+                          dtype=np.float32)
+        left_ear, right_ear, avg_ear = compute_ears(lms)
+        feature_vec = np.append(coords, [left_ear, right_ear, avg_ear]).reshape(1, -1)
+        return feature_vec, avg_ear, lms
 
     def _to_proto(self, landmarks):
         proto = landmark_pb2.NormalizedLandmarkList()
@@ -110,19 +135,43 @@ class FaceTracker:
                     connection_drawing_spec=self.styles.get_default_face_mesh_contours_style())
         return frame_bgr
 
+    def draw_eye_indicators(self, frame, lms, avg_ear):
+        """Draw EAR value and colour-coded eye outlines on frame."""
+        if lms is None:
+            return frame
+        h, w = frame.shape[:2]
+        eyes_open = avg_ear >= EAR_CLOSED_THRESH
+        color = (80, 200, 80) if eyes_open else (50, 50, 220)
+
+        # Draw dots on eye corners for visual feedback
+        for idx in [LEFT_EYE["outer"], LEFT_EYE["inner"],
+                    RIGHT_EYE["outer"], RIGHT_EYE["inner"]]:
+            lm = lms[idx]
+            cx, cy = int(lm.x * w), int(lm.y * h)
+            cv2.circle(frame, (cx, cy), 4, color, -1)
+
+        # EAR readout bottom-left
+        ear_text  = f"EAR: {avg_ear:.3f}"
+        eye_state = "Eyes Open" if eyes_open else "Eyes CLOSED"
+        cv2.putText(frame, ear_text,  (10, h - 50), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, color, 1, cv2.LINE_AA)
+        cv2.putText(frame, eye_state, (10, h - 33), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, color, 1, cv2.LINE_AA)
+        return frame
+
 # ── HUD ───────────────────────────────────────────────────────────────────────
 def draw_hud(frame, fps, prediction, confidence, alert,
-             show_tess, show_cont, model_loaded):
+             ear_override, show_tess, show_cont, model_loaded):
     h, w = frame.shape[:2]
     font  = cv2.FONT_HERSHEY_SIMPLEX
     small = 0.52
 
-    # Top bar
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (w, 38), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
 
-    cv2.putText(frame, f"FPS: {fps:5.1f}", (10, 26), font, small, (200, 255, 200), 1, cv2.LINE_AA)
+    cv2.putText(frame, f"FPS: {fps:5.1f}", (10, 26), font, small,
+                (200, 255, 200), 1, cv2.LINE_AA)
 
     if model_loaded and prediction:
         color = CLASS_COLORS.get(prediction, (255, 255, 255))
@@ -134,15 +183,14 @@ def draw_hud(frame, fps, prediction, confidence, alert,
     cv2.putText(frame, "[T] Mesh",     (w - 200, 26), font, small, tess_col, 1, cv2.LINE_AA)
     cv2.putText(frame, "[C] Contours", (w - 120, 26), font, small, cont_col, 1, cv2.LINE_AA)
 
-    # Drowsiness alert banner
-    if alert and prediction in ("drowsy", "asleep"):
-        alert_color = CLASS_COLORS[prediction]
-        msg = "⚠  DROWSINESS DETECTED  ⚠" if prediction == "drowsy" else "⚠  DRIVER ASLEEP  ⚠"
+    # Alert banner
+    if alert:
+        alert_color = CLASS_COLORS["drowsy"]
+        msg = "⚠  EYES CLOSED — DROWSINESS  ⚠" if ear_override else "⚠  DROWSINESS DETECTED  ⚠"
         cv2.rectangle(frame, (0, h//2 - 40), (w, h//2 + 40), (0, 0, 0), -1)
-        cv2.putText(frame, msg, (w//2 - 200, h//2 + 12),
-                    font, 0.9, alert_color, 2, cv2.LINE_AA)
+        cv2.putText(frame, msg, (w//2 - 220, h//2 + 12),
+                    font, 0.85, alert_color, 2, cv2.LINE_AA)
 
-    # Bottom hint bar
     cv2.rectangle(frame, (0, h - 30), (w, h), (0, 0, 0), -1)
     hint = "S: snapshot    Q: quit"
     if not model_loaded:
@@ -155,7 +203,6 @@ def draw_hud(frame, fps, prediction, confidence, alert,
 def main():
     ensure_model()
 
-    # Load classifier if available
     model_loaded = False
     clf = le = None
     if os.path.exists(CLASSIFIER_PATH):
@@ -167,7 +214,6 @@ def main():
         print(f"Classifier loaded. Classes: {list(le.classes_)}")
     else:
         print(f"[WARN] {CLASSIFIER_PATH} not found — showing face mesh only.")
-        print("       Run train_model.py to generate the model.")
 
     tracker = FaceTracker()
     cap     = cv2.VideoCapture(0)
@@ -179,48 +225,69 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     print("Webcam opened.  Q=quit  S=snapshot  T=mesh  C=contours")
 
-    # Rolling prediction smoother
-    pred_buffer = collections.deque(maxlen=SMOOTHING_FRAMES)
-    prev_time   = time.time()
-    snapshot_n  = 0
-    prediction  = None
-    confidence  = 0.0
-    alert       = False
+    pred_buffer       = collections.deque(maxlen=SMOOTHING_FRAMES)
+    closed_frame_count = 0   # consecutive frames with eyes closed
+    prev_time          = time.time()
+    snapshot_n         = 0
+    prediction         = None
+    confidence         = 0.0
+    alert              = False
+    ear_override       = False  # True when alert is triggered by EAR rule
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        results  = tracker.process(frame)
+        results   = tracker.process(frame)
         annotated = tracker.draw_mesh(frame, results)
 
-        # ── Classification ──
+        avg_ear   = None
+        lms_ref   = None
+
         if model_loaded:
-            feats = tracker.get_feature_vector(results)
+            feats, avg_ear, lms_ref = tracker.get_feature_vector(results)
+
             if feats is not None:
+                # ── ML prediction ──
                 proba      = clf.predict_proba(feats)[0]
                 pred_idx   = int(np.argmax(proba))
                 pred_label = le.inverse_transform([pred_idx])[0]
                 pred_conf  = float(proba[pred_idx])
                 pred_buffer.append((pred_label, pred_conf))
 
+                # ── EAR rule-based override ──
+                if avg_ear < EAR_CLOSED_THRESH:
+                    closed_frame_count += 1
+                else:
+                    closed_frame_count = 0
+
             if pred_buffer:
-                # Majority vote over smoothing window
                 labels     = [p[0] for p in pred_buffer]
                 prediction = max(set(labels), key=labels.count)
                 confidence = np.mean([p[1] for p in pred_buffer
                                       if p[0] == prediction])
-                alert      = (prediction in ("drowsy", "asleep")
-                              and confidence >= ALERT_THRESHOLD)
 
-        # ── FPS ──
+                # Override to drowsy if eyes have been closed long enough
+                ear_override = closed_frame_count >= EAR_CLOSED_FRAMES
+                if ear_override:
+                    prediction = "drowsy"
+                    confidence = 1.0
+
+                alert = (prediction == "drowsy" and
+                         (confidence >= ALERT_THRESHOLD or ear_override))
+
+        # Draw EAR indicators
+        if avg_ear is not None:
+            annotated = tracker.draw_eye_indicators(annotated, lms_ref, avg_ear)
+
         now       = time.time()
         fps       = 1.0 / max(now - prev_time, 1e-6)
         prev_time = now
 
         annotated = draw_hud(annotated, fps, prediction, confidence,
-                             alert, tracker.show_tess, tracker.show_cont,
+                             alert, ear_override,
+                             tracker.show_tess, tracker.show_cont,
                              model_loaded)
 
         cv2.imshow("Driver Drowsiness Detection", annotated)
