@@ -65,6 +65,7 @@ print(f"\nTrain: {len(X_train)}  |  Test: {len(X_test)}")
 # RandomForest will naturally weight them appropriately.
 rf = RandomForestClassifier(
     n_estimators=200,
+    class_weight="balanced",
     max_depth=None,
     n_jobs=-1,
     random_state=RANDOM_STATE,
