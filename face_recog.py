@@ -27,12 +27,12 @@ from mediapipe.framework.formats import landmark_pb2
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL_PATH        = "face_landmarker.task"
 CLASSIFIER_PATH   = "drowsy_model.pkl"
-SMOOTHING_FRAMES  = 10      # rolling window for stable predictions
-ALERT_THRESHOLD   = 0.60    # confidence above which DROWSY triggers alert
+SMOOTHING_FRAMES  = 20      # rolling window for stable predictions
+ALERT_THRESHOLD   = 0.75    # confidence above which DROWSY triggers alert
 
 # EAR thresholds
 EAR_CLOSED_THRESH = 0.20    # below this = eye closed
-EAR_CLOSED_FRAMES = 15      # consecutive closed frames before override fires
+EAR_CLOSED_FRAMES = 25     # consecutive closed frames before override fires
 
 CLASS_COLORS = {
     "awake":  (80,  200, 80),
